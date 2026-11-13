@@ -1,0 +1,62 @@
+services:
+  db:
+    image: postgis/postgis:15-3.4
+    container_name: geoportal_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - '5444:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: geoportal_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - '3001:3001'
+    environment:
+      PORT: 3001
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/postgres?schema=public"
+      NEXT_PUBLIC_MAPTILER_KEY: ${NEXT_PUBLIC_MAPTILER_KEY}
+      # Use the Linux binary compiled into the image — never the Windows path from .env
+      POTREE_CONVERTER_PATH: /usr/local/bin/PotreeConverter
+      APS_CLIENT_ID: ${APS_CLIENT_ID:-}
+      APS_CLIENT_SECRET: ${APS_CLIENT_SECRET:-}
+    volumes:
+      - ./backend/public/nubes_procesadas:/app/public/nubes_procesadas
+      - ./backend/public/nube_procesada:/app/public/nube_procesada
+      - ./backend/public/ortofotos:/app/public/ortofotos
+      - ./backend/public/planos:/app/public/planos
+      - ./backend/uploads_tmp:/app/uploads_tmp
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: geoportal_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '3000:3000'
+    environment:
+      # Server-side var: frontend Next.js proxies /api/** to this URL
+      BACKEND_URL: http://backend:3001
+      NEXT_PUBLIC_MAPTILER_KEY: ${NEXT_PUBLIC_MAPTILER_KEY}
+
+volumes:
+  pgdata:

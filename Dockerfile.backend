@@ -1,0 +1,77 @@
+# ── Stage 0: Build PotreeConverter from source ──────────────────────────────
+# Uses Debian Bookworm so glibc matches the runner stage.
+FROM debian:bookworm-slim AS potree-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake make g++ git ca-certificates libtbb-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch 2.1.1 \
+        https://github.com/potree/PotreeConverter.git /src \
+    # Force all bundled deps (LASzip, brotli) to build as static libs so the
+    # final binary has no extra shared-library dependencies beyond libtbb.
+    && cmake -S /src -B /src/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build /src/build --parallel "$(nproc)" \
+    && POTREE_BIN=$(find /src/build -maxdepth 4 -name "PotreeConverter" -type f | head -1) \
+    && test -n "$POTREE_BIN" \
+    && install -m 755 "$POTREE_BIN" /usr/local/bin/PotreeConverter \
+    # Copy any remaining shared libs the binary may still need at runtime
+    && mkdir -p /potree-libs \
+    && find /src/build -name "*.so*" -type f -exec cp -P {} /potree-libs/ \; || true
+
+# ── Stage 1: deps ──────────────────────────────────────────────────────────
+FROM node:20-slim AS deps
+WORKDIR /app
+COPY backend/package.json backend/package-lock.json* ./
+RUN npm ci --omit=dev
+
+# ── Stage 2: builder ───────────────────────────────────────────────────────
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY backend/package.json backend/package-lock.json* ./
+RUN npm ci
+COPY backend/ .
+RUN npx prisma generate
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# ── Stage 3: runner ────────────────────────────────────────────────────────
+FROM node:20-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# libtbb12 : Intel oneTBB runtime (PotreeConverter's only dynamic system dep)
+# openssl  : required by Prisma client on Debian Bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libtbb12 openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser  --system --uid 1001 nextjs
+
+# PotreeConverter binary + any bundled shared libs from the build stage
+COPY --from=potree-builder /usr/local/bin/PotreeConverter /usr/local/bin/PotreeConverter
+COPY --from=potree-builder /potree-libs/ /usr/local/lib/
+RUN ldconfig
+
+COPY --from=builder /app/public          ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static    ./.next/static
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+
+# Persistent directories for processed assets and temporary uploads
+RUN mkdir -p public/nubes_procesadas public/nube_procesada \
+             public/ortofotos public/planos uploads_tmp && \
+    chown -R nextjs:nodejs \
+        public/nubes_procesadas public/nube_procesada \
+        public/ortofotos public/planos uploads_tmp
+
+USER nextjs
+EXPOSE 3001
+ENV PORT=3001
+ENV HOSTNAME="0.0.0.0"
+
+CMD ["node", "server.js"]

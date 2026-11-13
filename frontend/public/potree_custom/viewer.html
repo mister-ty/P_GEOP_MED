@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Visor LiDAR — Geo-Portal Medellín</title>
+
+  <link rel="stylesheet" href="../nube_procesada/libs/potree/potree.css">
+  <link rel="stylesheet" href="../nube_procesada/libs/jquery-ui/jquery-ui.min.css">
+  <link rel="stylesheet" href="../nube_procesada/libs/openlayers3/ol.css">
+  <link rel="stylesheet" href="../nube_procesada/libs/spectrum/spectrum.css">
+  <link rel="stylesheet" href="../nube_procesada/libs/jstree/themes/mixed/style.css">
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+
+    .potree_container { position: absolute; inset: 0; }
+
+    /* ── Dark sidebar ── */
+    #potree_sidebar_container {
+      background: rgba(10, 15, 30, 0.92) !important;
+      backdrop-filter: blur(8px);
+      border-right: 1px solid rgba(99,102,241,.2);
+      transition: width .3s ease, opacity .3s ease;
+      overflow: hidden;
+      width: 300px;
+    }
+    #potree_sidebar_container.collapsed { width: 0 !important; opacity: 0; }
+    #potree_sidebar_container .card,
+    #potree_sidebar_container .card-header,
+    #potree_sidebar_container .card-body {
+      background: transparent !important;
+      border-color: rgba(255,255,255,.08) !important;
+      color: #cbd5e1 !important;
+    }
+    #potree_sidebar_container label,
+    #potree_sidebar_container span,
+    #potree_sidebar_container a { color: #94a3b8 !important; }
+
+    /* ── Sidebar toggle ── */
+    #sidebar_toggle {
+      position: absolute; top: 50%; left: 300px;
+      transform: translateY(-50%); z-index: 1000;
+      width: 20px; height: 48px;
+      background: rgba(10,15,30,.9);
+      border: 1px solid rgba(99,102,241,.35); border-left: none;
+      border-radius: 0 8px 8px 0;
+      color: #6366f1; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: left .3s ease, background .2s;
+    }
+    #sidebar_toggle:hover { background: rgba(99,102,241,.2); }
+    #sidebar_toggle.collapsed { left: 0; }
+
+    /* ── Loading overlay ── */
+    #geo_overlay {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px;
+      color: #c7d2fe; font-family: system-ui, sans-serif; font-size: 14px;
+      pointer-events: none; z-index: 999; transition: opacity .4s;
+    }
+    #geo_overlay.hidden { opacity: 0; }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid rgba(99,102,241,.25); border-top-color: #6366f1;
+      border-radius: 50%; animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Bottom HUD ── */
+    #geo_hud {
+      position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,.55); backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,.1); border-radius: 20px;
+      padding: 6px 16px; color: rgba(255,255,255,.6);
+      font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .04em;
+      pointer-events: none; z-index: 998;
+    }
+
+    /* ── Toolbar shared ── */
+    .geo-toolbar {
+      position: absolute; z-index: 1000;
+      display: flex; gap: 6px;
+      background: rgba(10,15,30,.88); backdrop-filter: blur(8px);
+      border: 1px solid rgba(99,102,241,.25); border-radius: 12px;
+      padding: 6px;
+    }
+    .geo-toolbar button {
+      display: flex; align-items: center; gap: 5px; justify-content: center;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px; color: #94a3b8; cursor: pointer;
+      font-size: 11px; font-family: system-ui, sans-serif;
+      padding: 5px 9px; transition: all .15s; white-space: nowrap;
+    }
+    .geo-toolbar button:hover { background: rgba(99,102,241,.25); color: #e0e7ff; border-color: rgba(99,102,241,.5); }
+    .geo-toolbar button.active { background: rgba(99,102,241,.35); color: #c7d2fe; border-color: #6366f1; }
+    .geo-toolbar button.danger:hover { background: rgba(239,68,68,.25); color: #fca5a5; border-color: rgba(239,68,68,.5); }
+
+    /* ── Measurement toolbar (top-right) ── */
+    #measure_toolbar { top: 12px; right: 12px; flex-direction: column; }
+
+    /* ── Color toolbar (bottom-right) ── */
+    #color_toolbar { bottom: 46px; right: 12px; }
+
+    /* ── Measurement info box ── */
+    #measure_info {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      background: rgba(10,15,30,.9); backdrop-filter: blur(6px);
+      border: 1px solid rgba(99,102,241,.4); border-radius: 10px;
+      padding: 8px 16px; color: #a5b4fc;
+      font-family: system-ui, sans-serif; font-size: 12px;
+      z-index: 999; display: none; pointer-events: none;
+    }
+    #measure_info.visible { display: block; }
+  </style>
+
+  <!-- Disable Cache API before Potree loads to avoid ERR_CACHE_OPERATION_NOT_SUPPORTED -->
+  <script>
+    try {
+      Object.defineProperty(globalThis, 'caches', { get: () => undefined, configurable: true });
+    } catch(_) { /* ignore */ }
+  </script>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div id="geo_overlay">
+    <div class="spinner"></div>
+    <span id="geo_status">Cargando nube de puntos…</span>
+  </div>
+
+  <!-- Sidebar collapse toggle -->
+  <button id="sidebar_toggle" title="Colapsar/expandir panel">‹</button>
+
+  <!-- Potree container -->
+  <div class="potree_container">
+    <div id="potree_render_area"></div>
+    <div id="potree_sidebar_container"></div>
+  </div>
+
+  <!-- HUD -->
+  <div id="geo_hud">GEO-PORTAL MEDELLÍN · LiDAR</div>
+
+  <!-- Measurement active hint -->
+  <div id="measure_info">Haz clic para añadir puntos · Doble clic para terminar</div>
+
+  <!-- ── Measurement toolbar (top-right) ── -->
+  <div id="measure_toolbar" class="geo-toolbar" style="flex-direction:column">
+    <button id="btn_dist"   title="Medir distancia">📏 Distancia</button>
+    <button id="btn_area"   title="Medir área">📐 Área</button>
+    <button id="btn_vol"    title="Medir volumen">📦 Volumen</button>
+    <button id="btn_point"  title="Coordenadas de punto">📍 Punto</button>
+    <button id="btn_clear"  class="danger" title="Borrar mediciones">✕ Borrar</button>
+  </div>
+
+  <!-- ── Color classification toolbar (bottom-right) ── -->
+  <div id="color_toolbar" class="geo-toolbar">
+    <button id="col_rgb"    class="active" title="Color original RGB">🎨 RGB</button>
+    <button id="col_height" title="Color por altura">🌈 Altura</button>
+    <button id="col_int"    title="Color por intensidad">💡 Intens.</button>
+    <button id="col_class"  title="Color por clasificación LAS">🏷️ Clasif.</button>
+  </div>
+
+  <!-- ── Potree deps ── -->
+  <script src="../nube_procesada/libs/jquery/jquery-3.1.1.min.js"></script>
+  <script src="../nube_procesada/libs/spectrum/spectrum.js"></script>
+  <script src="../nube_procesada/libs/jquery-ui/jquery-ui.min.js"></script>
+  <script src="../nube_procesada/libs/other/BinaryHeap.js"></script>
+  <script src="../nube_procesada/libs/tween/tween.min.js"></script>
+  <script src="../nube_procesada/libs/d3/d3.js"></script>
+  <script src="../nube_procesada/libs/proj4/proj4.js"></script>
+  <script src="../nube_procesada/libs/openlayers3/ol.js"></script>
+  <script src="../nube_procesada/libs/i18next/i18next.js"></script>
+  <script src="../nube_procesada/libs/jstree/jstree.js"></script>
+  <script src="../nube_procesada/libs/potree/potree.js"></script>
+  <script src="../nube_procesada/libs/plasio/js/laslaz.js"></script>
+
+  <script>
+    const params   = new URLSearchParams(globalThis.location.search);
+    const cloudUrl = params.get('cloud');
+    const overlay  = document.getElementById('geo_overlay');
+    const statusEl = document.getElementById('geo_status');
+    const measureInfo = document.getElementById('measure_info');
+
+    let activeMaterial = null;
+    let activeMeasureBtn = null;
+
+    /* ── Helpers ─────────────────────────────────────────────── */
+    function setColorBtn(btn) {
+      document.querySelectorAll('#color_toolbar button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+
+    function setMeasureBtn(btn) {
+      if (activeMeasureBtn) activeMeasureBtn.classList.remove('active');
+      activeMeasureBtn = btn;
+      if (btn) btn.classList.add('active');
+    }
+
+    function setColorMode(mode) {
+      if (!activeMaterial) return;
+      try {
+        switch (mode) {
+          case 'rgb':
+            activeMaterial.activeAttributeName = 'rgba';
+            if (typeof Potree !== 'undefined' && Potree.PointColorType)
+              activeMaterial.colorType = Potree.PointColorType.RGB;
+            break;
+          case 'height':
+            if (typeof Potree !== 'undefined' && Potree.PointColorType)
+              activeMaterial.colorType = Potree.PointColorType.HEIGHT;
+            else
+              activeMaterial.activeAttributeName = 'elevation';
+            break;
+          case 'intensity':
+            activeMaterial.activeAttributeName = 'intensity';
+            if (typeof Potree !== 'undefined' && Potree.PointColorType)
+              activeMaterial.colorType = Potree.PointColorType.INTENSITY;
+            break;
+          case 'classification':
+            activeMaterial.activeAttributeName = 'classification';
+            if (typeof Potree !== 'undefined' && Potree.PointColorType)
+              activeMaterial.colorType = Potree.PointColorType.CLASSIFICATION;
+            break;
+        }
+      } catch(e) {
+        console.warn('[color-mode]', e);
+      }
+    }
+
+    function startMeasurement(opts) {
+      if (!globalThis.viewer || !globalThis.viewer.measuringTool) return;
+      try {
+        globalThis.viewer.measuringTool.startInsertion(opts);
+        measureInfo.classList.add('visible');
+        setTimeout(() => measureInfo.classList.remove('visible'), 5000);
+      } catch(e) {
+        console.warn('[measure]', e);
+      }
+    }
+
+    function clearMeasurements() {
+      if (!globalThis.viewer) return;
+      try {
+        const scene = globalThis.viewer.scene;
+        if (scene && scene.measurements) {
+          [...scene.measurements].forEach(m => scene.removeMeasurement(m));
+        }
+        if (scene && scene.volumes) {
+          [...scene.volumes].forEach(v => scene.removeVolume(v));
+        }
+      } catch(e) {
+        console.warn('[clear-measure]', e);
+      }
+      setMeasureBtn(null);
+    }
+
+    /* ── Color toolbar wiring ────────────────────────────────── */
+    document.getElementById('col_rgb').addEventListener('click', function() {
+      setColorMode('rgb'); setColorBtn(this);
+    });
+    document.getElementById('col_height').addEventListener('click', function() {
+      setColorMode('height'); setColorBtn(this);
+    });
+    document.getElementById('col_int').addEventListener('click', function() {
+      setColorMode('intensity'); setColorBtn(this);
+    });
+    document.getElementById('col_class').addEventListener('click', function() {
+      setColorMode('classification'); setColorBtn(this);
+    });
+
+    /* ── Measurement toolbar wiring ──────────────────────────── */
+    document.getElementById('btn_dist').addEventListener('click', function() {
+      setMeasureBtn(this);
+      startMeasurement({ showDistances: true, showArea: false, closed: false, name: 'Distancia' });
+    });
+    document.getElementById('btn_area').addEventListener('click', function() {
+      setMeasureBtn(this);
+      startMeasurement({ showDistances: true, showArea: true, closed: true, name: 'Área' });
+    });
+    document.getElementById('btn_vol').addEventListener('click', function() {
+      setMeasureBtn(this);
+      if (globalThis.viewer && globalThis.viewer.volumeTool) {
+        try { globalThis.viewer.volumeTool.startInsertion(); } catch(e) { console.warn('[vol]', e); }
+        measureInfo.classList.add('visible');
+        setTimeout(() => measureInfo.classList.remove('visible'), 5000);
+      }
+    });
+    document.getElementById('btn_point').addEventListener('click', function() {
+      setMeasureBtn(this);
+      startMeasurement({ showDistances: false, showArea: false, closed: false, maxMarkers: 1, name: 'Punto' });
+    });
+    document.getElementById('btn_clear').addEventListener('click', function() {
+      clearMeasurements();
+    });
+
+    if (!cloudUrl) {
+      statusEl.textContent = '⚠️ URL de nube no especificada.';
+    } else {
+      /* ── Init Potree viewer ── */
+      globalThis.viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
+
+      // Cap pixel ratio so GPU framebuffers stay small on HiDPI screens
+      viewer.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+
+      viewer.setBackground('black');
+      viewer.setFOV(60);
+      // 1M is a good balance: enough detail without exhausting VRAM.
+      // Higher budgets can cause WebGL context loss that blocks the parent map.
+      viewer.setPointBudget(1_000_000);
+
+      // EDL uses extra framebuffers; keep it off by default to save VRAM.
+      viewer.setEDLEnabled(false);
+
+      viewer.loadGUI(() => {
+        viewer.setLanguage('es');
+        viewer.toggleSidebar();
+
+        const btn = document.getElementById('sidebar_toggle');
+        const sc  = document.getElementById('potree_sidebar_container');
+        let collapsed = false;
+        btn.addEventListener('click', () => {
+          collapsed = !collapsed;
+          sc.classList.toggle('collapsed', collapsed);
+          btn.classList.toggle('collapsed', collapsed);
+          btn.textContent = collapsed ? '›' : '‹';
+          btn.style.left  = collapsed ? '0px' : '300px';
+        });
+      });
+
+      /* ── Load point cloud ── */
+      Potree.loadPointCloud(cloudUrl, 'Intervencion', function(e) {
+        try {
+          const pointcloud = e.pointcloud;
+          const material   = pointcloud.material;
+          activeMaterial   = material;
+
+          material.size          = 1;
+          material.pointSizeType = Potree.PointSizeType.FIXED;
+          material.shape         = Potree.PointShape.CIRCLE;
+
+          const attrs  = pointcloud.pcoGeometry?.pointAttributes?.attributes ?? [];
+          const hasRGB = attrs.some(a => a.name === 'rgba' || a.name === 'rgb');
+          if (hasRGB) {
+            material.activeAttributeName = 'rgba';
+          } else {
+            material.activeAttributeName = 'elevation';
+            if (typeof Potree !== 'undefined' && Potree.PointColorType)
+              material.colorType = Potree.PointColorType.HEIGHT;
+            document.querySelectorAll('#color_toolbar button').forEach(b => b.classList.remove('active'));
+            document.getElementById('col_height').classList.add('active');
+          }
+
+          viewer.scene.addPointCloud(pointcloud);
+
+          const bb  = pointcloud.boundingBox;
+          // THREE is bundled inside potree.js but NOT exposed as window.THREE.
+          // Get the Vector3 constructor from an existing instance to avoid the global.
+          const V3  = bb.min.constructor;
+
+          const size   = bb.getSize(new V3());
+          const center = new V3();
+          bb.getCenter(center);
+
+          const halfExtent = Math.max(size.x, size.y) / 2;
+          const fovRad     = (viewer.getFOV() * Math.PI) / 180;
+          const dist       = (halfExtent / Math.tan(fovRad / 2)) * 1.4;
+
+          viewer.scene.view.setView(
+            new V3(center.x, center.y - dist * 0.25, center.z + dist),
+            center,
+            1000,
+          );
+        } catch (initErr) {
+          console.error('[potree-init] Error al posicionar cámara:', initErr);
+        }
+
+        const hideOverlay = () => {
+          overlay.classList.add('hidden');
+          setTimeout(() => { overlay.style.display = 'none'; }, 450);
+        };
+
+        hideOverlay();
+        setTimeout(() => { hideOverlay(); }, 3000);
+      });
+    }
+  </script>
+</body>
+</html>

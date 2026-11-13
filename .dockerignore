@@ -1,0 +1,24 @@
+**/node_modules
+**/.next
+**/.git
+**/*.tsbuildinfo
+
+# LiDAR point clouds and orthophotos — mounted as Docker volumes
+backend/public/nubes_procesadas
+backend/public/nube_procesada
+backend/public/ortofotos
+backend/uploads_tmp
+
+# Temp and dev files
+.env*
+.agent
+.agents
+.claude
+.cluade
+*.docx
+error.txt
+generate_docx_final.py
+cleanup.ts
+test-prisma.ts
+skills-lock.json
+README.md
